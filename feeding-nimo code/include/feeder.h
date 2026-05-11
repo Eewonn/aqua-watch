@@ -8,7 +8,7 @@
 
 class Feeder {
 public:
-    Feeder(int servoPin, int upPin, int setPin, int downPin, const char* ssid, const char* password, int lcdAddr = 0x27);
+    Feeder(int servoPin, int upPin, int setPin, int downPin, int lcdAddr = 0x27);
     void begin();
     void update();
     void setFeedingTime(int hour, int minute);
@@ -21,8 +21,6 @@ private:
     int servoPin;
     int upPin, setPin, downPin;
     LiquidCrystal_I2C lcd;
-    const char* wifiSsid;
-    const char* wifiPassword;
     WiFiUDP ntpUDP;
     NTPClient timeClient;
     bool wifiConnected;

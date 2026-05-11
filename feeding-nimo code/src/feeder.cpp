@@ -2,9 +2,8 @@
 #include <WiFi.h>
 #include <Wire.h>
 
-Feeder::Feeder(int servoPin, int upPin, int setPin, int downPin, const char* ssid, const char* password, int lcdAddr)
+Feeder::Feeder(int servoPin, int upPin, int setPin, int downPin, int lcdAddr)
     : servoPin(servoPin), upPin(upPin), setPin(setPin), downPin(downPin),
-      wifiSsid(ssid), wifiPassword(password),
       ntpUDP(), timeClient(ntpUDP, "pool.ntp.org", 0, 60000), // update every 60 sec
       wifiConnected(false), feedingHour(12), feedingMinute(0), lastCheck(0), currentState(NORMAL),
       upPressed(false), setPressed(false), downPressed(false), lcd(lcdAddr, 16, 2) {
@@ -22,13 +21,7 @@ void Feeder::begin() {
     lcd.clear();
     lcd.print("Feeder Starting...");
     lcd.setCursor(0, 1);
-    lcd.print("WiFi connecting");
-
-    WiFi.begin(wifiSsid, wifiPassword);
-    unsigned long startMs = millis();
-    while (WiFi.status() != WL_CONNECTED && millis() - startMs < 10000) {
-        delay(500);
-    }
+    lcd.print("Checking WiFi");
 
     if (WiFi.status() == WL_CONNECTED) {
         wifiConnected = true;
@@ -49,6 +42,7 @@ void Feeder::begin() {
 }
 
 void Feeder::update() {
+    wifiConnected = WiFi.status() == WL_CONNECTED;
     if (wifiConnected) {
         timeClient.update();
     }
