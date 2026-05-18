@@ -14,18 +14,15 @@ import {
   View,
 } from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
-import { Droplets, Wifi, Moon, Bell, Thermometer, Sliders, Info, RefreshCw, Lock, Unlock, CheckCircle2, AlertCircle } from 'lucide-react-native'
+import { Droplets, Wifi, Moon, Bell, Sliders, Info, RefreshCw, Lock, Unlock, CheckCircle2, AlertCircle } from 'lucide-react-native'
 import {
-  getApiUrl, setApiUrl,
-  getDeviceId, setDeviceId,
   getWifiSsid, setWifiSsid,
   getWifiPassword, setWifiPassword,
-  getDeviceSetupUrl, setDeviceSetupUrl,
+  getDeviceSetupUrl,
   getDarkMode, setDarkMode,
   getAlertsEnabled, setAlertsEnabled,
-  getTempUnit, setTempUnit,
 } from '../../lib/storage'
-import { USE_MOCK } from '../../lib/api'
+import { discoverDevice, USE_MOCK } from '../../lib/api'
 
 // ─── Tokens ──────────────────────────────────────────────────────────────────
 const BG = '#EEF3F8'
@@ -79,22 +76,20 @@ function PrefRow({
 
 // ─── Screen ──────────────────────────────────────────────────────────────────
 export default function SettingsScreen() {
-  const [apiUrl, setApiUrlState] = useState('')
-  const [deviceId, setDeviceIdState] = useState('')
   const [wifiSsid, setWifiSsidState] = useState('')
   const [wifiPassword, setWifiPasswordState] = useState('')
   const [deviceSetupUrl, setDeviceSetupUrlState] = useState('http://192.168.4.1')
   const [networks, setNetworks] = useState<WifiNetwork[]>([])
   const [scanning, setScanning] = useState(false)
   const [provisioning, setProvisioning] = useState(false)
+  const [hardwareScanning, setHardwareScanning] = useState(false)
   const [setupStatus, setSetupStatus] = useState<'idle' | 'ready' | 'error' | 'saved'>('idle')
   const [setupMessage, setSetupMessage] = useState('Waiting for device setup connection')
   const [darkMode, setDarkModeState] = useState(false)
   const [alerts, setAlertsState] = useState(true)
-  const [tempUnit, setTempUnitState] = useState<'celsius' | 'fahrenheit'>('celsius')
   const [focused, setFocused] = useState<string | null>(null)
   const savedOpacity = useRef(new Animated.Value(0)).current
-  const canConfigure = Boolean(wifiSsid.trim() && apiUrl.trim() && deviceId.trim() && !provisioning)
+  const canConfigure = Boolean(wifiSsid.trim() && !provisioning)
   const setupStatusColor =
     setupStatus === 'ready' || setupStatus === 'saved' ? '#1A8C3E'
     : setupStatus === 'error' ? '#C2410C'
@@ -102,33 +97,22 @@ export default function SettingsScreen() {
 
   useEffect(() => {
     Promise.all([
-      getApiUrl(), getDeviceId(), getWifiSsid(), getWifiPassword(), getDeviceSetupUrl(), getDarkMode(), getAlertsEnabled(), getTempUnit(),
-    ]).then(([url, id, ssid, password, setupUrl, dm, al, tu]) => {
-      setApiUrlState(url)
-      setDeviceIdState(id)
+      getWifiSsid(), getWifiPassword(), getDeviceSetupUrl(), getDarkMode(), getAlertsEnabled(),
+    ]).then(([ssid, password, setupUrl, dm, al]) => {
       setWifiSsidState(ssid)
       setWifiPasswordState(password)
       setDeviceSetupUrlState(setupUrl)
       setDarkModeState(dm)
       setAlertsState(al)
-      setTempUnitState(tu)
     })
   }, [])
 
   async function handleSave() {
-    if (!apiUrl.trim() || !deviceId.trim()) {
-      Alert.alert('Required', 'API Base and Device ID are required.')
-      return
-    }
     await Promise.all([
-      setApiUrl(apiUrl.trim()),
-      setDeviceId(deviceId.trim()),
       setWifiSsid(wifiSsid.trim()),
       setWifiPassword(wifiPassword),
-      setDeviceSetupUrl(deviceSetupUrl.trim()),
       setDarkMode(darkMode),
       setAlertsEnabled(alerts),
-      setTempUnit(tempUnit),
     ])
     Animated.sequence([
       Animated.timing(savedOpacity, { toValue: 1, duration: 200, useNativeDriver: true }),
@@ -177,8 +161,6 @@ export default function SettingsScreen() {
         body: JSON.stringify({
           ssid: wifiSsid.trim(),
           password: wifiPassword,
-          api_base: apiUrl.trim(),
-          device_id: deviceId.trim(),
         }),
       })
       if (!res.ok) throw new Error(`Device returned ${res.status}`)
@@ -191,6 +173,24 @@ export default function SettingsScreen() {
       setSetupMessage('Could not send settings to the device')
     } finally {
       setProvisioning(false)
+    }
+  }
+
+  async function handleDiscoverHardware() {
+    setHardwareScanning(true)
+    setSetupStatus('idle')
+    setSetupMessage('Scanning local network for Feeding Nimo')
+    const result = await discoverDevice((checked) => {
+      setSetupMessage(`Checked ${checked} local addresses`)
+    })
+    setHardwareScanning(false)
+    if (result.data) {
+      setSetupStatus('saved')
+      setSetupMessage('Feeding Nimo hardware found')
+      Alert.alert('Hardware found', 'The app is now linked to the local Feeding Nimo device.')
+    } else {
+      setSetupStatus('error')
+      setSetupMessage(result.error ?? 'No hardware found')
     }
   }
 
@@ -226,7 +226,7 @@ export default function SettingsScreen() {
           )}
 
           <Text style={styles.pageTitle}>Feeding Nimo Settings</Text>
-          <Text style={styles.pageSubtitle}>Pair the device, point the app at your API, and tune preferences.</Text>
+          <Text style={styles.pageSubtitle}>Pair the device, find the hardware on your network, and tune preferences.</Text>
 
           {/* Device setup */}
           <View style={styles.sectionHeader}>
@@ -263,22 +263,6 @@ export default function SettingsScreen() {
                 <Text style={[styles.stepNumber, canConfigure && styles.stepNumberActive]}>3</Text>
                 <Text style={styles.stepText}>Send settings</Text>
               </View>
-            </View>
-            <View style={styles.formDivider} />
-            <View>
-              <Text style={styles.fieldLabel}>DEVICE SETUP URL</Text>
-              <TextInput
-                style={[styles.fieldInput, focused === 'setupUrl' && styles.fieldInputFocused]}
-                value={deviceSetupUrl}
-                onChangeText={setDeviceSetupUrlState}
-                placeholder="http://192.168.4.1"
-                placeholderTextColor={TEXT_LIGHT}
-                autoCapitalize="none"
-                autoCorrect={false}
-                keyboardType="url"
-                onFocus={() => setFocused('setupUrl')}
-                onBlur={() => setFocused(null)}
-              />
             </View>
             <View style={styles.formDivider} />
             <View>
@@ -356,37 +340,6 @@ export default function SettingsScreen() {
                 onBlur={() => setFocused(null)}
               />
             </View>
-            <View style={styles.formDivider} />
-            <View>
-              <Text style={styles.fieldLabel}>API BASE</Text>
-              <TextInput
-                style={[styles.fieldInput, focused === 'url' && styles.fieldInputFocused]}
-                value={apiUrl}
-                onChangeText={setApiUrlState}
-                placeholder="https://aqua-watch-backend.vercel.app"
-                placeholderTextColor={TEXT_LIGHT}
-                autoCapitalize="none"
-                autoCorrect={false}
-                keyboardType="url"
-                onFocus={() => setFocused('url')}
-                onBlur={() => setFocused(null)}
-              />
-            </View>
-            <View style={styles.formDivider} />
-            <View>
-              <Text style={styles.fieldLabel}>DEVICE ID</Text>
-              <TextInput
-                style={[styles.fieldInput, focused === 'device' && styles.fieldInputFocused]}
-                value={deviceId}
-                onChangeText={setDeviceIdState}
-                placeholder="esp32-001"
-                placeholderTextColor={TEXT_LIGHT}
-                autoCapitalize="none"
-                autoCorrect={false}
-                onFocus={() => setFocused('device')}
-                onBlur={() => setFocused(null)}
-              />
-            </View>
           </View>
 
           <TouchableOpacity
@@ -398,6 +351,17 @@ export default function SettingsScreen() {
             {provisioning
               ? <ActivityIndicator size="small" color="#FFFFFF" />
               : <Text style={styles.provisionBtnText}>{canConfigure ? 'Configure Feeding Nimo Device' : 'Complete Device Setup Fields'}</Text>}
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[styles.saveBtn, SHADOW, hardwareScanning && styles.scanBtnDisabled]}
+            onPress={handleDiscoverHardware}
+            disabled={hardwareScanning}
+            activeOpacity={0.85}
+          >
+            {hardwareScanning
+              ? <ActivityIndicator size="small" color="#FFFFFF" />
+              : <Text style={styles.saveBtnText}>Scan for Hardware</Text>}
           </TouchableOpacity>
 
           {/* App Preferences */}
@@ -429,6 +393,7 @@ export default function SettingsScreen() {
               iconColor={TEAL}
               label="Critical Alerts"
               subtitle="Notify when water parameters are out of range"
+              last
               right={
                 <Switch
                   value={alerts}
@@ -437,34 +402,6 @@ export default function SettingsScreen() {
                   thumbColor="#FFFFFF"
                   ios_backgroundColor="rgba(120,120,128,0.2)"
                 />
-              }
-            />
-            <PrefRow
-              Icon={Thermometer}
-              iconBg="rgba(255,149,0,0.12)"
-              iconColor="#FF9500"
-              label="Temperature Unit"
-              subtitle="Choose your preferred unit scale"
-              last
-              right={
-                <View style={styles.unitRow}>
-                  <TouchableOpacity
-                    style={[styles.unitBtn, tempUnit === 'celsius' && styles.unitBtnActive]}
-                    onPress={() => setTempUnitState('celsius')}
-                  >
-                    <Text style={[styles.unitBtnText, tempUnit === 'celsius' && styles.unitBtnTextActive]}>
-                      °C
-                    </Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    style={[styles.unitBtn, tempUnit === 'fahrenheit' && styles.unitBtnActive]}
-                    onPress={() => setTempUnitState('fahrenheit')}
-                  >
-                    <Text style={[styles.unitBtnText, tempUnit === 'fahrenheit' && styles.unitBtnTextActive]}>
-                      °F
-                    </Text>
-                  </TouchableOpacity>
-                </View>
               }
             />
           </View>
@@ -628,15 +565,6 @@ const styles = StyleSheet.create({
   prefLabel: { fontSize: 14, fontWeight: '600', color: TEXT_DARK, marginBottom: 2 },
   prefSubtitle: { fontSize: 11, color: TEXT_MID, lineHeight: 15 },
   rowDivider: { height: StyleSheet.hairlineWidth, backgroundColor: 'rgba(0,0,0,0.07)', marginLeft: 64 },
-
-  unitRow: { flexDirection: 'row', gap: 4 },
-  unitBtn: {
-    paddingHorizontal: 10, paddingVertical: 6,
-    borderRadius: 8, backgroundColor: '#F0F4F8',
-  },
-  unitBtnActive: { backgroundColor: TEAL },
-  unitBtnText: { fontSize: 12, fontWeight: '700', color: TEXT_MID },
-  unitBtnTextActive: { color: '#FFFFFF' },
 
   saveBtn: {
     backgroundColor: TEAL, borderRadius: 16,

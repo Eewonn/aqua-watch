@@ -3,15 +3,14 @@
 ## Project Structure & Module Organization
 
 - `feeding-nimo code/`: ESP32 PlatformIO firmware. Source files live in `src/`, headers in `include/`, and board settings in `platformio.ini`.
-- `api/`: Next.js API/dashboard. Routes are under `app/api/`, Supabase setup is in `lib/supabase.ts`, and static assets are in `public/`. Read `api/AGENTS.md` before changing Next.js code.
+- `api/`: Next.js local/web dashboard client. It talks directly to the ESP32 local control server and keeps static assets in `public/`. Read `api/AGENTS.md` before changing Next.js code.
 - `mobile/`: Expo React Native app. Screens are in `app/`, helpers in `lib/`, constants in `constants/`, and icons/splash assets in `assets/`.
-- `supabase/schema.sql`: Database schema for the backend.
 
 ## Build, Test, and Development Commands
 
 Run commands from the relevant subdirectory. `api/` and `mobile/` have separate lockfiles.
 
-- `cd api && npm install`: Install backend dependencies.
+- `cd api && npm install`: Install web dashboard dependencies.
 - `cd api && npm run dev`: Start Next.js locally.
 - `cd api && npm run build`: Build and type-check production output.
 - `cd api && npm run start`: Run the built app.
@@ -39,4 +38,4 @@ Pull requests should include a summary, testing performed, linked issue or task 
 
 ## Security & Configuration Tips
 
-Avoid committing production secrets, Supabase keys, or permanent device credentials. Firmware keeps Wi-Fi, API base, and device ID constants in `feeding-nimo code/src/main.cpp` to match the client workflow. Backend configuration uses `NEXT_PUBLIC_SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`.
+Avoid committing production secrets, Wi-Fi passwords, or permanent device credentials. Firmware stores Wi-Fi credentials in ESP32 preferences after setup. The app discovers the ESP32 on the local network and uses port `8020`.

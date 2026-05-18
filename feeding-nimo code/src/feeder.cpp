@@ -1,11 +1,9 @@
 #include "feeder.h"
-#include <WiFi.h>
 #include <Wire.h>
 
 Feeder::Feeder(int servoPin, int upPin, int setPin, int downPin, int lcdAddr)
     : servoPin(servoPin), upPin(upPin), setPin(setPin), downPin(downPin),
-      ntpUDP(), timeClient(ntpUDP, "pool.ntp.org", 0, 60000), // update every 60 sec
-      wifiConnected(false), feedingHour(12), feedingMinute(0), lastCheck(0), currentState(NORMAL),
+      feedingHour(12), feedingMinute(0), clockSetMillis(0), clockSeconds(0), lastCheck(0), currentState(NORMAL),
       upPressed(false), setPressed(false), downPressed(false), lcd(lcdAddr, 16, 2) {
 }
 
@@ -21,43 +19,13 @@ void Feeder::begin() {
     lcd.clear();
     lcd.print("Feeder Starting...");
     lcd.setCursor(0, 1);
-    lcd.print("Checking WiFi");
-
-    if (WiFi.status() == WL_CONNECTED) {
-        wifiConnected = true;
-        lcd.clear();
-        lcd.print("WiFi connected");
-        lcd.setCursor(0, 1);
-        lcd.print("Getting time...");
-        timeClient.begin();
-        timeClient.update();
-    } else {
-        wifiConnected = false;
-        lcd.clear();
-        lcd.print("WiFi failed");
-        lcd.setCursor(0, 1);
-        lcd.print("Continuing...");
-    }
+    lcd.print("Waiting time sync");
     delay(1000);
 }
 
 void Feeder::update() {
-    wifiConnected = WiFi.status() == WL_CONNECTED;
-    if (wifiConnected) {
-        timeClient.update();
-    }
-    int currentHour = timeClient.getHours();
-    int currentMinute = timeClient.getMinutes();
-
-    // Check if time to feed
-    static int lastFedHour = -1;
-    static int lastFedMinute = -1;
-    if (currentHour == feedingHour && currentMinute == feedingMinute &&
-        (currentHour != lastFedHour || currentMinute != lastFedMinute)) {
-        spinServo();
-        lastFedHour = currentHour;
-        lastFedMinute = currentMinute;
-    }
+    int currentHour = getCurrentHour();
+    int currentMinute = getCurrentMinute();
 
     updateDisplay(currentHour, currentMinute);
     handleButtons();
@@ -72,12 +40,35 @@ void Feeder::setFeedingTime(int hour, int minute) {
     feedingMinute = minute;
 }
 
+void Feeder::setCurrentTime(int hour, int minute, int second) {
+    if (hour < 0 || hour > 23 || minute < 0 || minute > 59 || second < 0 || second > 59) {
+        return;
+    }
+    clockSeconds = (hour * 3600UL) + (minute * 60UL) + second;
+    clockSetMillis = millis();
+}
+
 int Feeder::getFeedingHour() {
     return feedingHour;
 }
 
 int Feeder::getFeedingMinute() {
     return feedingMinute;
+}
+
+int Feeder::getCurrentHour() const {
+    unsigned long seconds = (clockSeconds + ((millis() - clockSetMillis) / 1000UL)) % 86400UL;
+    return seconds / 3600UL;
+}
+
+int Feeder::getCurrentMinute() const {
+    unsigned long seconds = (clockSeconds + ((millis() - clockSetMillis) / 1000UL)) % 86400UL;
+    return (seconds / 60UL) % 60UL;
+}
+
+int Feeder::getCurrentSecond() const {
+    unsigned long seconds = (clockSeconds + ((millis() - clockSetMillis) / 1000UL)) % 86400UL;
+    return seconds % 60UL;
 }
 
 void Feeder::handleButtons() {

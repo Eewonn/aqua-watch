@@ -13,7 +13,7 @@ import { SafeAreaView } from 'react-native-safe-area-context'
 import { LineChart } from 'react-native-gifted-charts'
 import { TrendingDown, TrendingUp, BarChart2, Droplets, Wifi, Activity, RefreshCw } from 'lucide-react-native'
 import { getReadingHistoryResult, type Reading } from '../../lib/api'
-import { STATUS_COLORS, phStatus, tdsStatus, foodStatus } from '../../constants/ranges'
+import { STATUS_COLORS, phStatus, foodStatus } from '../../constants/ranges'
 
 // ─── Tokens ──────────────────────────────────────────────────────────────────
 const BG = '#EEF3F8'
@@ -36,16 +36,16 @@ const SHADOW = {
 const { width } = Dimensions.get('window')
 const CHART_W = width - 40 - 36
 
-type Sensor = 'ph' | 'tds' | 'food_level'
+type Sensor = 'ph' | 'weight' | 'food_level'
 const SENSORS: { key: Sensor; label: string; fullLabel: string; unit: string }[] = [
   { key: 'ph', label: 'pH', fullLabel: 'Potential Hydrogen', unit: 'pH' },
-  { key: 'tds', label: 'TDS', fullLabel: 'Total Dissolved Solids', unit: 'ppm' },
+  { key: 'weight', label: 'Weight', fullLabel: 'Food Weight', unit: 'kg' },
   { key: 'food_level', label: 'Food', fullLabel: 'Dispenser Capacity', unit: '%' },
 ]
 
 function getColor(sensor: Sensor, v: number): string {
   if (sensor === 'ph') return STATUS_COLORS[phStatus(v)]
-  if (sensor === 'tds') return STATUS_COLORS[tdsStatus(v)]
+  if (sensor === 'weight') return STATUS_COLORS[foodStatus(v * 100)]
   return STATUS_COLORS[foodStatus(v)]
 }
 
@@ -113,7 +113,7 @@ export default function GraphsScreen() {
     avg: readings.reduce((s, r) => s + r[active], 0) / readings.length,
   } : null
 
-  const fmt = (v: number) => active === 'ph' ? v.toFixed(2) : Math.round(v).toString()
+  const fmt = (v: number) => active === 'ph' || active === 'weight' ? v.toFixed(2) : Math.round(v).toString()
   const first = readings.length > 1 ? readings[0][active] : null
   const delta = latest !== null && first !== null ? latest - first : null
 
@@ -219,7 +219,7 @@ export default function GraphsScreen() {
           ) : readings.length === 0 ? (
             <View style={styles.loadingBox}>
               <Text style={styles.noDataTitle}>No data yet</Text>
-              <Text style={styles.noData}>Readings will appear after the ESP32 posts sensor values.</Text>
+              <Text style={styles.noData}>Readings will appear after the app connects to the ESP32.</Text>
             </View>
           ) : (
             <LineChart

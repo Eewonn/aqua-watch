@@ -1,26 +1,35 @@
-import { getApiUrl, getDeviceId } from './storage'
+import { getDeviceUrl, setDeviceUrl } from './storage'
 
 export const USE_MOCK = false
+export const DEVICE_PORT = 8020
+
+export interface DeviceSchedule {
+  hour: number
+  minute: number
+}
+
+export interface DeviceStatus {
+  time: string
+  weight: number
+  level: 'LOW' | 'MEDIUM' | 'HIGH' | string
+  ph: number
+  safety: 'SAFE' | 'UNSAFE' | string
+  schedule: DeviceSchedule[]
+}
 
 export interface Reading {
   id: string
   device_id: string
   ph: number
-  tds: number
+  weight: number
+  level: string
+  safety: string
   food_level: number
-  created_at: string
-}
-
-export interface FeedCommand {
-  id: string
-  device_id: string
-  executed: boolean
   created_at: string
 }
 
 export interface Schedule {
   id: string
-  device_id: string
   time: string
   enabled: boolean
   created_at: string
@@ -31,73 +40,109 @@ interface ApiResult<T> {
   error: string | null
 }
 
-// ---------------------------------------------------------------------------
-// Mock data
-// ---------------------------------------------------------------------------
-
-function mockHistory(): Reading[] {
-  const now = Date.now()
-  return Array.from({ length: 50 }, (_, i) => {
-    const t = now - (49 - i) * 5 * 60 * 1000 // every 5 min
-    return {
-      id: String(i),
-      device_id: 'esp32-001',
-      ph: parseFloat((7.1 + Math.sin(i / 5) * 0.4 + (Math.random() - 0.5) * 0.1).toFixed(2)),
-      tds: Math.round(320 + Math.cos(i / 8) * 60 + (Math.random() - 0.5) * 20),
-      food_level: Math.max(10, Math.round(85 - i * 0.6 + (Math.random() - 0.5) * 3)),
-      created_at: new Date(t).toISOString(),
-    }
-  })
-}
-
-const MOCK_HISTORY = mockHistory()
-const MOCK_LATEST = MOCK_HISTORY[MOCK_HISTORY.length - 1]
-
-const MOCK_SCHEDULES: Schedule[] = [
-  { id: '1', device_id: 'esp32-001', time: '08:00', enabled: true, created_at: new Date().toISOString() },
-  { id: '2', device_id: 'esp32-001', time: '18:30', enabled: true, created_at: new Date().toISOString() },
+const DISCOVERY_HOSTS = [
+  'http://feeding-nimo.local:8020',
+  ...range('192.168.1'),
+  ...range('192.168.0'),
+  ...range('10.0.0'),
 ]
 
-// ---------------------------------------------------------------------------
-// Real API helpers
-// ---------------------------------------------------------------------------
+let readingHistory: Reading[] = []
 
-async function base(): Promise<{ url: string; deviceId: string }> {
-  const [url, deviceId] = await Promise.all([getApiUrl(), getDeviceId()])
-  return { url, deviceId }
+function range(prefix: string): string[] {
+  return Array.from({ length: 253 }, (_, i) => `http://${prefix}.${i + 2}:${DEVICE_PORT}`)
 }
 
-async function safeFetch(...args: Parameters<typeof fetch>): Promise<Response | null> {
+function withTimeout(ms: number): AbortSignal {
+  const controller = new AbortController()
+  setTimeout(() => controller.abort(), ms)
+  return controller.signal
+}
+
+async function safeFetch(url: string, timeoutMs = 2500): Promise<Response | null> {
   try {
-    return await fetch(...args)
+    return await fetch(url, { signal: withTimeout(timeoutMs) })
   } catch {
     return null
   }
 }
 
 async function readError(res: Response | null): Promise<string> {
-  if (!res) return 'Could not reach the API.'
+  if (!res) return 'Could not reach Feeding Nimo on the local network.'
   try {
     const body = await res.json()
     if (body && typeof body.error === 'string') return body.error
   } catch {
-    // Fall through to status-based message.
+    // Fall through to status message.
   }
-  return `API request failed with status ${res.status}.`
+  return `Device request failed with status ${res.status}.`
 }
 
-async function readJson<T>(res: Response | null): Promise<ApiResult<T>> {
+function statusToReading(status: DeviceStatus, deviceUrl: string): Reading {
+  const foodLevel = status.level === 'HIGH' ? 90 : status.level === 'MEDIUM' ? 55 : 15
+  return {
+    id: String(Date.now()),
+    device_id: deviceUrl,
+    ph: Number(status.ph) || 0,
+    weight: Number(status.weight) || 0,
+    level: String(status.level ?? 'LOW'),
+    safety: String(status.safety ?? 'UNSAFE'),
+    food_level: foodLevel,
+    created_at: new Date().toISOString(),
+  }
+}
+
+function schedulesFromStatus(status: DeviceStatus): Schedule[] {
+  return (Array.isArray(status.schedule) ? status.schedule : []).map((item, index) => ({
+    id: `${item.hour}:${item.minute}:${index}`,
+    time: `${String(item.hour).padStart(2, '0')}:${String(item.minute).padStart(2, '0')}`,
+    enabled: true,
+    created_at: new Date().toISOString(),
+  }))
+}
+
+async function getStatusFrom(url: string): Promise<ApiResult<DeviceStatus>> {
+  const res = await safeFetch(`${url}/status`)
   if (!res?.ok) return { data: null, error: await readError(res) }
   try {
-    return { data: await res.json() as T, error: null }
+    const data = await res.json() as DeviceStatus
+    if (typeof data.time !== 'string' || typeof data.ph !== 'number' || !Array.isArray(data.schedule)) {
+      return { data: null, error: 'Device returned invalid status data.' }
+    }
+    return { data, error: null }
   } catch {
-    return { data: null, error: 'API returned invalid JSON.' }
+    return { data: null, error: 'Device returned invalid JSON.' }
   }
 }
 
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
+async function requireDeviceUrl(): Promise<ApiResult<string>> {
+  const url = await getDeviceUrl()
+  if (!url) return { data: null, error: 'Run hardware scan in Settings first.' }
+  return { data: url, error: null }
+}
+
+export async function discoverDevice(onProgress?: (checked: number) => void): Promise<ApiResult<string>> {
+  const saved = await getDeviceUrl()
+  const candidates = saved ? [saved, ...DISCOVERY_HOSTS.filter((url) => url !== saved)] : DISCOVERY_HOSTS
+  let checked = 0
+
+  for (let i = 0; i < candidates.length; i += 24) {
+    const chunk = candidates.slice(i, i + 24)
+    const results = await Promise.all(chunk.map(async (url) => {
+      const status = await getStatusFrom(url)
+      return status.data ? url : null
+    }))
+    checked += chunk.length
+    onProgress?.(checked)
+    const found = results.find(Boolean)
+    if (found) {
+      await setDeviceUrl(found)
+      return { data: found, error: null }
+    }
+  }
+
+  return { data: null, error: 'No Feeding Nimo device found on common local subnets.' }
+}
 
 export async function getLatestReading(): Promise<Reading | null> {
   const result = await getLatestReadingResult()
@@ -105,10 +150,15 @@ export async function getLatestReading(): Promise<Reading | null> {
 }
 
 export async function getLatestReadingResult(): Promise<ApiResult<Reading>> {
-  if (USE_MOCK) return { data: MOCK_LATEST, error: null }
-  const { url, deviceId } = await base()
-  const res = await safeFetch(`${url}/api/readings?device_id=${encodeURIComponent(deviceId)}`)
-  return readJson<Reading>(res)
+  const deviceUrl = await requireDeviceUrl()
+  if (!deviceUrl.data) return { data: null, error: deviceUrl.error }
+
+  const result = await getStatusFrom(deviceUrl.data)
+  if (!result.data) return { data: null, error: result.error }
+
+  const reading = statusToReading(result.data, deviceUrl.data)
+  readingHistory = [...readingHistory, reading].slice(-50)
+  return { data: reading, error: null }
 }
 
 export async function getReadingHistory(limit = 50): Promise<Reading[]> {
@@ -117,24 +167,18 @@ export async function getReadingHistory(limit = 50): Promise<Reading[]> {
 }
 
 export async function getReadingHistoryResult(limit = 50): Promise<ApiResult<Reading[]>> {
-  if (USE_MOCK) return { data: MOCK_HISTORY.slice(-limit), error: null }
-  const { url, deviceId } = await base()
-  const res = await safeFetch(
-    `${url}/api/readings/history?device_id=${encodeURIComponent(deviceId)}&limit=${encodeURIComponent(String(limit))}`
-  )
-  return readJson<Reading[]>(res)
+  const latest = await getLatestReadingResult()
+  if (latest.error && readingHistory.length === 0) return { data: null, error: latest.error }
+  return { data: readingHistory.slice(-limit), error: null }
 }
 
 export async function triggerFeed(): Promise<{ success: boolean; error?: string }> {
-  if (USE_MOCK) return { success: true }
-  const { url, deviceId } = await base()
-  const res = await safeFetch(`${url}/api/feed`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ device_id: deviceId }),
-  })
+  const deviceUrl = await requireDeviceUrl()
+  if (!deviceUrl.data) return { success: false, error: deviceUrl.error ?? undefined }
+
+  const res = await safeFetch(`${deviceUrl.data}/feed`)
   if (!res?.ok) return { success: false, error: await readError(res) }
-  return res.json()
+  return { success: true }
 }
 
 export async function getSchedules(): Promise<Schedule[]> {
@@ -143,53 +187,40 @@ export async function getSchedules(): Promise<Schedule[]> {
 }
 
 export async function getSchedulesResult(): Promise<ApiResult<Schedule[]>> {
-  if (USE_MOCK) return { data: MOCK_SCHEDULES, error: null }
-  const { url, deviceId } = await base()
-  const res = await safeFetch(`${url}/api/schedule?device_id=${encodeURIComponent(deviceId)}`)
-  return readJson<Schedule[]>(res)
+  const deviceUrl = await requireDeviceUrl()
+  if (!deviceUrl.data) return { data: null, error: deviceUrl.error }
+
+  const result = await getStatusFrom(deviceUrl.data)
+  if (!result.data) return { data: null, error: result.error }
+  return { data: schedulesFromStatus(result.data), error: null }
 }
 
 export async function addSchedule(time: string): Promise<Schedule | null> {
-  if (USE_MOCK) {
-    const s: Schedule = { id: String(Date.now()), device_id: 'esp32-001', time, enabled: true, created_at: new Date().toISOString() }
-    MOCK_SCHEDULES.push(s)
-    return s
-  }
-  const { url, deviceId } = await base()
-  const res = await safeFetch(`${url}/api/schedule`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ device_id: deviceId, time }),
-  })
-  return (await readJson<Schedule>(res)).data
+  const deviceUrl = await requireDeviceUrl()
+  if (!deviceUrl.data) return null
+
+  const [hour, minute] = time.split(':').map(Number)
+  const res = await safeFetch(`${deviceUrl.data}/schedule?hour=${hour}&minute=${minute}`)
+  if (!res?.ok) return null
+  return { id: `${hour}:${minute}:${Date.now()}`, time, enabled: true, created_at: new Date().toISOString() }
 }
 
-export async function updateSchedule(
-  id: string,
-  updates: { time?: string; enabled?: boolean }
-): Promise<Schedule | null> {
-  if (USE_MOCK) {
-    const idx = MOCK_SCHEDULES.findIndex((s) => s.id === id)
-    if (idx === -1) return null
-    MOCK_SCHEDULES[idx] = { ...MOCK_SCHEDULES[idx], ...updates }
-    return MOCK_SCHEDULES[idx]
-  }
-  const { url } = await base()
-  const res = await safeFetch(`${url}/api/schedule/${id}`, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(updates),
-  })
-  return (await readJson<Schedule>(res)).data
-}
+export async function clearSchedules(): Promise<boolean> {
+  const deviceUrl = await requireDeviceUrl()
+  if (!deviceUrl.data) return false
 
-export async function deleteSchedule(id: string): Promise<boolean> {
-  if (USE_MOCK) {
-    const idx = MOCK_SCHEDULES.findIndex((s) => s.id === id)
-    if (idx !== -1) MOCK_SCHEDULES.splice(idx, 1)
-    return true
-  }
-  const { url } = await base()
-  const res = await safeFetch(`${url}/api/schedule/${id}`, { method: 'DELETE' })
+  const res = await safeFetch(`${deviceUrl.data}/schedule?clear=1`)
   return res?.ok ?? false
+}
+
+export async function syncDeviceTime(date = new Date()): Promise<{ success: boolean; error?: string }> {
+  const deviceUrl = await requireDeviceUrl()
+  if (!deviceUrl.data) return { success: false, error: deviceUrl.error ?? undefined }
+
+  const hour = date.getHours()
+  const minute = date.getMinutes()
+  const second = date.getSeconds()
+  const res = await safeFetch(`${deviceUrl.data}/settime?hour=${hour}&minute=${minute}&second=${second}`)
+  if (!res?.ok) return { success: false, error: await readError(res) }
+  return { success: true }
 }

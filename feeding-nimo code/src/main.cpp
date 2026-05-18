@@ -1,13 +1,10 @@
 #include <Arduino.h>
 #include <WiFi.h>
-#include <HTTPClient.h>
-#include <WiFiClientSecure.h>
 #include <WebServer.h>
 #include <Preferences.h>
 #include <ArduinoJson.h>
 #include "Ph4502C.h"
 #include "Feeder.h"
-#include "TDSSensor.h"
 #include "hx711.h"
 
 // Pin config
@@ -15,40 +12,39 @@
 #define I2C_SDA         21
 #define I2C_SCL         22
 #define OLED_ADDR       0x3C
-#define PPM_OLED_ADDR   0x3D
 #define FEEDER_SERVO_PIN 27
 #define BUTTON_UP_PIN   12
 #define BUTTON_SET_PIN  13
 #define BUTTON_DOWN_PIN 14
-#define TDS_SENSOR_PIN  34
 #define HX711_DOUT_PIN  18
 #define HX711_SCK_PIN   19
 #define LED_LOW_PIN     25
 #define LED_MEDIUM_PIN  26
 #define LED_HIGH_PIN    33
 
-// Defaults used before the ESP32 is configured from the app.
-static const char* DEFAULT_API_BASE  = "https://aqua-watch-backend.vercel.app";
-static const char* DEFAULT_DEVICE_ID = "esp32-001";
 static const char* SETUP_AP_SSID     = "Feeding Nimo Setup";
 static const char* SETUP_AP_PASSWORD = "feedingnimo";
+static const uint16_t CONTROL_PORT   = 8020;
+static const uint8_t MAX_SCHEDULES   = 12;
 
-static const unsigned long READING_INTERVAL_MS = 5UL * 60UL * 1000UL;
-static const unsigned long COMMAND_INTERVAL_MS = 10UL * 1000UL;
-static const uint8_t API_RETRY_COUNT = 3;
-static const unsigned long API_RETRY_DELAY_MS = 750;
+struct FeedingSchedule {
+    uint8_t hour;
+    uint8_t minute;
+};
 
 class App {
 public:
     App()
-        : phSensor(PH_SENSOR_PIN, TDS_SENSOR_PIN, I2C_SDA, I2C_SCL, OLED_ADDR, PPM_OLED_ADDR),
+        : phSensor(PH_SENSOR_PIN, I2C_SDA, I2C_SCL, OLED_ADDR),
           feeder(FEEDER_SERVO_PIN, BUTTON_UP_PIN, BUTTON_SET_PIN, BUTTON_DOWN_PIN),
           loadCell(HX711_DOUT_PIN, HX711_SCK_PIN, LED_LOW_PIN, LED_MEDIUM_PIN, LED_HIGH_PIN),
           setupServer(80),
+          controlServer(CONTROL_PORT),
           setupPortalActive(false),
+          controlServerActive(false),
           reconnectAtMs(0),
-          lastReadingMs(0),
-          lastCommandMs(0) {}
+          scheduleCount(0),
+          lastScheduleCheckMinute(-1) {}
 
     void setup() {
         Serial.begin(115200);
@@ -65,10 +61,6 @@ public:
         feeder.begin();
         loadCell.begin();
 
-        if (WiFi.status() == WL_CONNECTED) {
-            postReadings();
-        }
-
         Serial.println("Feeding Nimo started");
     }
 
@@ -77,22 +69,13 @@ public:
         feeder.update();
         loadCell.update();
         handleSetupPortal();
+        handleControlServer();
+        checkSchedules();
 
         unsigned long now = millis();
         if (reconnectAtMs && now >= reconnectAtMs) {
             reconnectAtMs = 0;
             connectOrStartSetupPortal();
-        }
-
-        if (WiFi.status() == WL_CONNECTED) {
-            if (now - lastReadingMs >= READING_INTERVAL_MS) {
-                lastReadingMs = now;
-                postReadings();
-            }
-            if (now - lastCommandMs >= COMMAND_INTERVAL_MS) {
-                lastCommandMs = now;
-                pollAndExecuteCommands();
-            }
         }
 
         delay(50);
@@ -104,33 +87,54 @@ private:
     LoadCell loadCell;
     Preferences prefs;
     WebServer setupServer;
+    WebServer controlServer;
     String wifiSsid;
     String wifiPassword;
-    String apiBase;
-    String deviceId;
     bool setupPortalActive;
+    bool controlServerActive;
     unsigned long reconnectAtMs;
-    unsigned long lastReadingMs;
-    unsigned long lastCommandMs;
+    FeedingSchedule schedules[MAX_SCHEDULES];
+    uint8_t scheduleCount;
+    int lastScheduleCheckMinute;
 
     void loadConfig() {
         prefs.begin("aquawatch", false);
         wifiSsid = prefs.getString("wifi_ssid", "");
         wifiPassword = prefs.getString("wifi_pass", "");
-        apiBase = prefs.getString("api_base", DEFAULT_API_BASE);
-        deviceId = prefs.getString("device_id", DEFAULT_DEVICE_ID);
+
+        scheduleCount = prefs.getUChar("schedule_count", 0);
+        if (scheduleCount > MAX_SCHEDULES) scheduleCount = 0;
+        for (uint8_t i = 0; i < scheduleCount; i++) {
+            char key[12];
+            snprintf(key, sizeof(key), "sched_%u", i);
+            uint16_t encoded = prefs.getUShort(key, 0);
+            schedules[i].hour = encoded / 60;
+            schedules[i].minute = encoded % 60;
+        }
+        applyFirstScheduleToDisplay();
     }
 
-    void saveConfig(const String& ssid, const String& password, const String& base, const String& id) {
+    void saveWifiConfig(const String& ssid, const String& password) {
         wifiSsid = ssid;
         wifiPassword = password;
-        apiBase = base.length() ? base : DEFAULT_API_BASE;
-        deviceId = id.length() ? id : DEFAULT_DEVICE_ID;
-
         prefs.putString("wifi_ssid", wifiSsid);
         prefs.putString("wifi_pass", wifiPassword);
-        prefs.putString("api_base", apiBase);
-        prefs.putString("device_id", deviceId);
+    }
+
+    void saveSchedules() {
+        prefs.putUChar("schedule_count", scheduleCount);
+        for (uint8_t i = 0; i < scheduleCount; i++) {
+            char key[12];
+            snprintf(key, sizeof(key), "sched_%u", i);
+            prefs.putUShort(key, (schedules[i].hour * 60) + schedules[i].minute);
+        }
+        applyFirstScheduleToDisplay();
+    }
+
+    void applyFirstScheduleToDisplay() {
+        if (scheduleCount > 0) {
+            feeder.setFeedingTime(schedules[0].hour, schedules[0].minute);
+        }
     }
 
     void connectOrStartSetupPortal() {
@@ -151,9 +155,10 @@ private:
         Serial.println();
 
         if (WiFi.status() == WL_CONNECTED) {
-            Serial.printf("WiFi connected: %s\n", WiFi.localIP().toString().c_str());
+            Serial.printf("WiFi connected: %s, control port %u\n", WiFi.localIP().toString().c_str(), CONTROL_PORT);
             setupPortalActive = false;
             setupServer.stop();
+            startControlServer();
             return;
         }
 
@@ -170,20 +175,35 @@ private:
 
         setupServer.on("/networks", HTTP_GET, [this]() { handleNetworks(); });
         setupServer.on("/configure", HTTP_POST, [this]() { handleConfigure(); });
-        setupServer.onNotFound([this]() {
-            if (setupServer.method() == HTTP_OPTIONS) {
-                sendCors(204, "text/plain", "");
-                return;
-            }
-            sendCors(404, "application/json", "{\"error\":\"not found\"}");
-        });
+        setupServer.onNotFound([this]() { sendCors(setupServer, 404, "application/json", "{\"error\":\"not found\"}"); });
         setupServer.begin();
         setupPortalActive = true;
+    }
+
+    void startControlServer() {
+        if (controlServerActive) return;
+
+        controlServer.on("/status", HTTP_GET, [this]() { handleStatus(); });
+        controlServer.on("/schedule", HTTP_GET, [this]() { handleSchedule(); });
+        controlServer.on("/settime", HTTP_GET, [this]() { handleSetTime(); });
+        controlServer.on("/feed", HTTP_GET, [this]() {
+            feeder.spinServoPublic();
+            sendCors(controlServer, 200, "application/json", "{\"success\":true}");
+        });
+        controlServer.onNotFound([this]() { sendCors(controlServer, 404, "application/json", "{\"error\":\"not found\"}"); });
+        controlServer.begin();
+        controlServerActive = true;
     }
 
     void handleSetupPortal() {
         if (setupPortalActive) {
             setupServer.handleClient();
+        }
+    }
+
+    void handleControlServer() {
+        if (controlServerActive) {
+            controlServer.handleClient();
         }
     }
 
@@ -201,7 +221,7 @@ private:
 
         String body;
         serializeJson(networks, body);
-        sendCors(200, "application/json", body);
+        sendCors(setupServer, 200, "application/json", body);
         WiFi.scanDelete();
     }
 
@@ -209,118 +229,113 @@ private:
         JsonDocument doc;
         DeserializationError err = deserializeJson(doc, setupServer.arg("plain"));
         if (err || !doc["ssid"].is<const char*>()) {
-            sendCors(400, "application/json", "{\"error\":\"ssid required\"}");
+            sendCors(setupServer, 400, "application/json", "{\"error\":\"ssid required\"}");
             return;
         }
 
         String ssid = doc["ssid"].as<String>();
         String password = doc["password"] | "";
-        String base = doc["api_base"] | apiBase;
-        String id = doc["device_id"] | deviceId;
-        saveConfig(ssid, password, base, id);
+        saveWifiConfig(ssid, password);
 
-        sendCors(200, "application/json", "{\"success\":true,\"message\":\"saved\"}");
+        sendCors(setupServer, 200, "application/json", "{\"success\":true,\"message\":\"saved\"}");
         reconnectAtMs = millis() + 1000;
     }
 
-    void sendCors(int code, const char* type, const String& body) {
-        setupServer.sendHeader("Access-Control-Allow-Origin", "*");
-        setupServer.sendHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-        setupServer.sendHeader("Access-Control-Allow-Headers", "Content-Type");
-        setupServer.send(code, type, body);
+    void handleStatus() {
+        JsonDocument doc;
+        char timeBuffer[9];
+        snprintf(timeBuffer, sizeof(timeBuffer), "%02d:%02d:%02d",
+            feeder.getCurrentHour(), feeder.getCurrentMinute(), feeder.getCurrentSecond());
+
+        float ph = phSensor.getPH();
+        float weight = loadCell.getWeight();
+        FoodLevel foodLevel = loadCell.getFoodLevel();
+
+        doc["time"] = timeBuffer;
+        doc["weight"] = weight;
+        doc["level"] = foodLevel == FOOD_LOW ? "LOW" : foodLevel == FOOD_MEDIUM ? "MEDIUM" : "HIGH";
+        doc["ph"] = ph;
+        doc["safety"] = (ph >= 6.5f && ph <= 8.5f) ? "SAFE" : "UNSAFE";
+        JsonArray arr = doc["schedule"].to<JsonArray>();
+        for (uint8_t i = 0; i < scheduleCount; i++) {
+            JsonObject item = arr.add<JsonObject>();
+            item["hour"] = schedules[i].hour;
+            item["minute"] = schedules[i].minute;
+        }
+
+        String body;
+        serializeJson(doc, body);
+        sendCors(controlServer, 200, "application/json", body);
     }
 
-    void postReadings() {
-        float ph        = phSensor.getPH();
-        float tds       = phSensor.getTDS();
-        float foodLevel = loadCell.getWeightPercent();
-
-        char body[128];
-        snprintf(body, sizeof(body),
-            "{\"device_id\":\"%s\",\"ph\":%.2f,\"tds\":%.1f,\"food_level\":%.1f}",
-            deviceId.c_str(), ph, tds, foodLevel);
-
-        WiFiClientSecure client;
-        client.setInsecure();
-        HTTPClient http;
-
-        char url[192];
-        snprintf(url, sizeof(url), "%s/api/readings", apiBase.c_str());
-        http.begin(client, url);
-        http.addHeader("Content-Type", "application/json");
-
-        int code = 0;
-        for (uint8_t attempt = 1; attempt <= API_RETRY_COUNT; attempt++) {
-            code = http.POST(body);
-            if (code >= 200 && code < 300) break;
-
-            Serial.printf("POST /api/readings attempt %u failed", attempt);
-            if (code > 0) {
-                Serial.printf(" with HTTP %d\n", code);
-            } else {
-                Serial.printf(": %s\n", http.errorToString(code).c_str());
-            }
-            if (attempt < API_RETRY_COUNT) delay(API_RETRY_DELAY_MS);
-        }
-
-        if (code > 0) {
-            Serial.printf("POST /api/readings -> %d\n", code);
-        } else {
-            Serial.printf("POST /api/readings failed: %s\n", http.errorToString(code).c_str());
-        }
-        http.end();
-    }
-
-    void pollAndExecuteCommands() {
-        WiFiClientSecure client;
-        client.setInsecure();
-        HTTPClient http;
-
-        char url[224];
-        snprintf(url, sizeof(url), "%s/api/commands/pending?device_id=%s", apiBase.c_str(), deviceId.c_str());
-        http.begin(client, url);
-
-        int code = 0;
-        for (uint8_t attempt = 1; attempt <= API_RETRY_COUNT; attempt++) {
-            code = http.GET();
-            if (code == 200) break;
-
-            Serial.printf("GET /api/commands/pending attempt %u -> %d\n", attempt, code);
-            if (attempt < API_RETRY_COUNT) delay(API_RETRY_DELAY_MS);
-        }
-
-        if (code != 200) {
-            Serial.printf("GET /api/commands/pending -> %d\n", code);
-            http.end();
+    void handleSchedule() {
+        if (controlServer.hasArg("clear") && controlServer.arg("clear") == "1") {
+            scheduleCount = 0;
+            saveSchedules();
+            sendCors(controlServer, 200, "application/json", "{\"success\":true}");
             return;
         }
 
-        String payload = http.getString();
-        http.end();
-
-        JsonDocument doc;
-        DeserializationError err = deserializeJson(doc, payload);
-        if (err || !doc.is<JsonArray>()) return;
-
-        JsonArray arr = doc.as<JsonArray>();
-        for (JsonObject cmd : arr) {
-            const char* id = cmd["id"];
-            if (!id) continue;
-
-            Serial.printf("Executing command %s\n", id);
-            feeder.spinServoPublic();
-
-            WiFiClientSecure c2;
-            c2.setInsecure();
-            HTTPClient h2;
-            char patchUrl[224];
-            snprintf(patchUrl, sizeof(patchUrl), "%s/api/commands/%s/execute", apiBase.c_str(), id);
-            h2.begin(c2, patchUrl);
-            h2.addHeader("Content-Type", "application/json");
-            int pcode = h2.sendRequest("PATCH", "{}");
-            Serial.printf("PATCH execute -> %d\n", pcode);
-            h2.end();
+        if (!controlServer.hasArg("hour") || !controlServer.hasArg("minute")) {
+            sendCors(controlServer, 400, "application/json", "{\"error\":\"hour and minute required\"}");
+            return;
         }
+
+        int hour = controlServer.arg("hour").toInt();
+        int minute = controlServer.arg("minute").toInt();
+        if (hour < 0 || hour > 23 || minute < 0 || minute > 59) {
+            sendCors(controlServer, 400, "application/json", "{\"error\":\"invalid time\"}");
+            return;
+        }
+        if (scheduleCount >= MAX_SCHEDULES) {
+            sendCors(controlServer, 400, "application/json", "{\"error\":\"schedule full\"}");
+            return;
+        }
+
+        schedules[scheduleCount++] = { static_cast<uint8_t>(hour), static_cast<uint8_t>(minute) };
+        saveSchedules();
+        sendCors(controlServer, 200, "application/json", "{\"success\":true}");
+    }
+
+    void handleSetTime() {
+        if (!controlServer.hasArg("hour") || !controlServer.hasArg("minute") || !controlServer.hasArg("second")) {
+            sendCors(controlServer, 400, "application/json", "{\"error\":\"hour, minute, and second required\"}");
+            return;
+        }
+
+        int hour = controlServer.arg("hour").toInt();
+        int minute = controlServer.arg("minute").toInt();
+        int second = controlServer.arg("second").toInt();
+        if (hour < 0 || hour > 23 || minute < 0 || minute > 59 || second < 0 || second > 59) {
+            sendCors(controlServer, 400, "application/json", "{\"error\":\"invalid time\"}");
+            return;
+        }
+
+        feeder.setCurrentTime(hour, minute, second);
+        lastScheduleCheckMinute = -1;
+        sendCors(controlServer, 200, "application/json", "{\"success\":true}");
+    }
+
+    void checkSchedules() {
+        int hour = feeder.getCurrentHour();
+        int minute = feeder.getCurrentMinute();
+        int minuteOfDay = hour * 60 + minute;
+        if (minuteOfDay == lastScheduleCheckMinute) return;
+
+        lastScheduleCheckMinute = minuteOfDay;
+        for (uint8_t i = 0; i < scheduleCount; i++) {
+            if (schedules[i].hour == hour && schedules[i].minute == minute) {
+                feeder.spinServoPublic();
+                break;
+            }
+        }
+    }
+
+    void sendCors(WebServer& server, int code, const char* type, const String& body) {
+        server.sendHeader("Access-Control-Allow-Origin", "*");
+        server.sendHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+        server.sendHeader("Access-Control-Allow-Headers", "Content-Type");
+        server.send(code, type, body);
     }
 };
 

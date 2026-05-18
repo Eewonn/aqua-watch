@@ -2,8 +2,6 @@
 #define FEEDER_H
 
 #include <ESP32Servo.h>
-#include <NTPClient.h>
-#include <WiFiUdp.h>
 #include <LiquidCrystal_I2C.h>
 
 class Feeder {
@@ -12,8 +10,12 @@ public:
     void begin();
     void update();
     void setFeedingTime(int hour, int minute);
+    void setCurrentTime(int hour, int minute, int second);
     int getFeedingHour();
     int getFeedingMinute();
+    int getCurrentHour() const;
+    int getCurrentMinute() const;
+    int getCurrentSecond() const;
     void spinServoPublic(); // for remote feed commands
 
 private:
@@ -21,11 +23,10 @@ private:
     int servoPin;
     int upPin, setPin, downPin;
     LiquidCrystal_I2C lcd;
-    WiFiUDP ntpUDP;
-    NTPClient timeClient;
-    bool wifiConnected;
     int feedingHour;
     int feedingMinute;
+    unsigned long clockSetMillis;
+    unsigned long clockSeconds;
     unsigned long lastCheck;
     enum State { NORMAL, SET_HOUR, SET_MINUTE };
     State currentState;

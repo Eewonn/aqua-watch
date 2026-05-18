@@ -6,12 +6,6 @@ export function phStatus(value: number): RangeStatus {
   return 'danger'
 }
 
-export function tdsStatus(value: number): RangeStatus {
-  if (value <= 500) return 'good'
-  if (value <= 800) return 'warning'
-  return 'danger'
-}
-
 export function foodStatus(value: number): RangeStatus {
   if (value >= 50) return 'good'
   if (value >= 20) return 'warning'

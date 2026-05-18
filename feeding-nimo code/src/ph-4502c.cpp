@@ -1,20 +1,16 @@
 #include "Ph4502C.h"
 
-PH4502C::PH4502C(int analogPin, int tdsPin, int i2cSda, int i2cScl, uint8_t oledAddress, uint8_t ppmOledAddress)
+PH4502C::PH4502C(int analogPin, int i2cSda, int i2cScl, uint8_t oledAddress)
     : analogPin_(analogPin),
       i2cSda_(i2cSda),
       i2cScl_(i2cScl),
       oledAddress_(oledAddress),
-      ppmOledAddress_(ppmOledAddress),
       calibrationOffsetMv_(0.0f),
       rawAdc_(0),
       voltageMv_(0.0f),
       phValue_(7.0f),
-      tdsValue_(0.0f),
       lastSampleMs_(0),
       display_(128, 64, &Wire, -1),
-      ppmDisplay_(128, 64, &Wire, -1),
-      tdsSensor_(tdsPin),
       serialPort_(nullptr),
       serialRxPin_(-1),
       serialTxPin_(-1),
@@ -72,12 +68,6 @@ bool PH4502C::begin() {
     if (!display_.begin(SSD1306_SWITCHCAPVCC, oledAddress_)) {
         return false;
     }
-    if (!ppmDisplay_.begin(SSD1306_SWITCHCAPVCC, ppmOledAddress_)) {
-        return false;
-    }
-
-    tdsSensor_.begin();
-
     display_.clearDisplay();
     display_.setTextColor(SSD1306_WHITE);
     display_.setTextSize(1);
@@ -85,14 +75,6 @@ bool PH4502C::begin() {
     display_.println("PH-4502C Ready");
     display_.println("Monitoring...");
     display_.display();
-
-    ppmDisplay_.clearDisplay();
-    ppmDisplay_.setTextColor(SSD1306_WHITE);
-    ppmDisplay_.setTextSize(1);
-    ppmDisplay_.setCursor(0, 0);
-    ppmDisplay_.println("PPM/TDS Monitor");
-    ppmDisplay_.println("Ready...");
-    ppmDisplay_.display();
 
     delay(800);
     lastSampleMs_ = millis();
@@ -108,17 +90,11 @@ void PH4502C::update() {
     if (!useSerial_ || !parseSerialData()) {
         sampleSensor();
     }
-    tdsValue_ = tdsSensor_.readTDS();
     drawDisplay();
-    drawPpmDisplay();
 }
 
 float PH4502C::getPH() const {
     return phValue_;
-}
-
-float PH4502C::getTDS() const {
-    return tdsSensor_.readTDS();
 }
 
 float PH4502C::getVoltageMillivolts() const {
@@ -175,24 +151,4 @@ void PH4502C::drawDisplay() {
     snprintf(buffer, sizeof(buffer), "Voltage: %.0fmV", voltageMv_);
     display_.println(buffer);
     display_.display();
-}
-
-void PH4502C::drawPpmDisplay() {
-    char buffer[32];
-
-    ppmDisplay_.clearDisplay();
-    ppmDisplay_.setTextSize(1);
-    ppmDisplay_.setCursor(0, 0);
-    ppmDisplay_.println("PPM/TDS Monitor");
-    ppmDisplay_.println();
-
-    ppmDisplay_.setTextSize(2);
-    ppmDisplay_.setCursor(0, 18);
-    snprintf(buffer, sizeof(buffer), "TDS: %.0f", tdsValue_);
-    ppmDisplay_.println(buffer);
-
-    ppmDisplay_.setTextSize(1);
-    ppmDisplay_.setCursor(0, 50);
-    ppmDisplay_.println("ppm");
-    ppmDisplay_.display();
 }

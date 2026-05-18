@@ -11,9 +11,9 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context'
 import { LinearGradient } from 'expo-linear-gradient'
 import Svg, { Circle, G } from 'react-native-svg'
-import { Droplets, FlaskConical, Droplet, Box, Wifi, WifiOff, RefreshCw, AlertCircle } from 'lucide-react-native'
+import { Droplets, FlaskConical, Box, Wifi, WifiOff, RefreshCw, AlertCircle } from 'lucide-react-native'
 import { getLatestReadingResult, type Reading } from '../../lib/api'
-import { phStatus, tdsStatus, foodStatus } from '../../constants/ranges'
+import { phStatus, foodStatus } from '../../constants/ranges'
 import type { RangeStatus } from '../../constants/ranges'
 
 // ─── Tokens ──────────────────────────────────────────────────────────────────
@@ -44,12 +44,6 @@ function phSubtitle(ph: number, s: RangeStatus): string {
   if (s === 'good') return ph < 7.2 ? 'Slightly Acidic' : ph > 7.8 ? 'Slightly Alkaline' : 'Neutral Balance'
   if (s === 'warning') return ph < 7 ? 'Acidic Levels' : 'Alkaline Levels'
   return 'Critical pH Level'
-}
-
-function tdsSubtitle(tds: number, s: RangeStatus): string {
-  if (s === 'good') return tds < 200 ? 'Ultra Pure Water' : tds < 400 ? 'Clear Clarity' : 'Good Clarity'
-  if (s === 'warning') return 'Moderate Minerals'
-  return 'High Mineral Content'
 }
 
 function foodSubtitle(food: number): string {
@@ -111,16 +105,13 @@ function SensorCard({ label, value, unit, subtitle, fill, color, Icon }: {
 // ─── Quality index ────────────────────────────────────────────────────────────
 function QualityCard({ reading }: { reading: Reading }) {
   const phS = phStatus(reading.ph)
-  const tdsS = tdsStatus(reading.tds)
-  const overall =
-    phS === 'danger' || tdsS === 'danger' ? 'danger'
-    : phS === 'warning' || tdsS === 'warning' ? 'warning'
-    : 'good'
+  const foodS = foodStatus(reading.food_level)
+  const overall = reading.safety === 'UNSAFE' || phS === 'danger' ? 'danger' : foodS === 'danger' ? 'warning' : 'good'
   const word = overall === 'good' ? 'Optimal' : overall === 'warning' ? 'Monitor' : 'Critical'
   const desc =
-    overall === 'good' ? 'Biological ecosystem is thriving'
-    : overall === 'warning' ? 'Some parameters need attention'
-    : 'Immediate action required'
+    overall === 'good' ? 'Local hardware reports safe water state'
+    : overall === 'warning' ? 'Food level needs attention'
+    : 'pH safety is unsafe'
 
   return (
     <LinearGradient colors={['#0A5F72', '#074858']} style={styles.qualityCard}>
@@ -135,8 +126,8 @@ function QualityCard({ reading }: { reading: Reading }) {
         </View>
         <View style={styles.qualityDivider} />
         <View style={styles.qualityStat}>
-          <Text style={styles.qualityStatLabel}>TDS</Text>
-          <Text style={styles.qualityStatValue}>{Math.round(reading.tds)} ppm</Text>
+          <Text style={styles.qualityStatLabel}>SAFETY</Text>
+          <Text style={styles.qualityStatValue}>{reading.safety}</Text>
         </View>
       </View>
     </LinearGradient>
@@ -166,13 +157,13 @@ function SummaryStrip({ reading, online, lastTime }: { reading: Reading; online:
         </View>
         <View style={styles.summaryDivider} />
         <View style={styles.summaryMetric}>
-          <Text style={styles.summaryLabel}>TDS</Text>
-          <Text style={styles.summaryValue}>{Math.round(reading.tds)}</Text>
+          <Text style={styles.summaryLabel}>Weight</Text>
+          <Text style={styles.summaryValue}>{reading.weight.toFixed(1)}</Text>
         </View>
         <View style={styles.summaryDivider} />
         <View style={styles.summaryMetric}>
-          <Text style={styles.summaryLabel}>Food</Text>
-          <Text style={styles.summaryValue}>{food}%</Text>
+          <Text style={styles.summaryLabel}>Level</Text>
+          <Text style={styles.summaryValue}>{reading.level}</Text>
         </View>
       </View>
       {lastTime && <Text style={styles.summaryFoot}>Last update {lastTime}</Text>}
@@ -260,18 +251,10 @@ export default function DashboardScreen() {
                 Icon={FlaskConical}
               />
               <SensorCard
-                label="TOTAL DISSOLVED SOLIDS"
-                value={String(Math.round(reading.tds))}
-                unit=" ppm"
-                subtitle={tdsSubtitle(reading.tds, tdsStatus(reading.tds))}
-                fill={Math.min(reading.tds / 800, 1)}
-                color={statusColor(tdsStatus(reading.tds))}
-                Icon={Droplet}
-              />
-              <SensorCard
                 label="DISPENSER CAPACITY"
-                value={`${Math.round(reading.food_level)}%`}
-                subtitle={foodSubtitle(reading.food_level)}
+                value={reading.weight.toFixed(1)}
+                unit=" kg"
+                subtitle={`${reading.level} - ${foodSubtitle(reading.food_level)}`}
                 fill={reading.food_level / 100}
                 color={statusColor(foodStatus(reading.food_level))}
                 Icon={Box}
@@ -285,9 +268,7 @@ export default function DashboardScreen() {
               </View>
               <Text style={styles.emptyTitle}>{error ? 'No live reading' : 'No readings yet'}</Text>
               <Text style={styles.emptyHint}>
-                {error === 'API request failed with status 404.'
-                  ? 'Waiting for the ESP32 to post its first reading.'
-                  : error ?? 'Pull down to refresh.'}
+                {error ?? 'Pull down to refresh.'}
               </Text>
               <TouchableOpacity style={styles.retryBtn} onPress={onRefresh} activeOpacity={0.8}>
                 <RefreshCw size={14} color="#FFFFFF" strokeWidth={2.4} />
